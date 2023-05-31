@@ -5,6 +5,7 @@
 #include <infrared_worker.h>
 #include <furi_hal_infrared.h>
 #include <gui/gui.h>
+#include <notification/notification_messages.h>
 
 #define TAG "IR Scope"
 #define COLS 128
@@ -13,6 +14,7 @@
 typedef struct {
     bool autoscale;
     uint16_t us_per_sample;
+    size_t x_origin;
     size_t timings_cnt;
     uint32_t* timings;
     uint32_t timings_sum;
@@ -43,7 +45,7 @@ static void render_callback(Canvas* canvas, void* ctx) {
     // Draw the signal chart.
     bool on = false;
     bool done = false;
-    size_t ix = 0;
+    size_t ix = state->x_origin;
     int timing_cols = -1; // Count of columns used to draw the current timing
     for(size_t row = 0; row < ROWS && !done; ++row) {
         for(size_t col = 0; col < COLS && !done; ++col) {
@@ -69,6 +71,8 @@ static void render_callback(Canvas* canvas, void* ctx) {
         char buf[20];
         snprintf(buf, sizeof(buf), "%uus", state->us_per_sample);
         canvas_draw_str_outline(canvas, 100, 64, buf);
+        /* snprintf(buf, sizeof(buf), "%u-%u", state->x_origin, state->timings_cnt);
+        canvas_draw_str_outline(canvas, 2, 64, buf); */
     }
 
     furi_mutex_release(state->mutex);
@@ -91,6 +95,7 @@ static void ir_received_callback(void* ctx, InfraredWorkerSignal* signal) {
     if(state->timings) {
         free(state->timings);
         state->timings_sum = 0;
+        state->x_origin = 0;
     }
 
     state->timings = malloc(state->timings_cnt * sizeof(uint32_t));
@@ -118,12 +123,22 @@ int32_t ir_scope_app(void* p) {
     }
 
     IRScopeState state = {
-        .autoscale = false, .us_per_sample = 200, .timings = NULL, .timings_cnt = 0, .mutex = NULL};
+        .autoscale = false, .us_per_sample = 200, .x_origin = 0, .timings = NULL, .timings_cnt = 0, .mutex = NULL};
     state.mutex = furi_mutex_alloc(FuriMutexTypeNormal);
     if(!state.mutex) {
         FURI_LOG_E(TAG, "Cannot create mutex.");
         return -1;
     }
+
+    NotificationApp* notification = furi_record_open(RECORD_NOTIFICATION);
+    const NotificationSequence sequence_button_error = {
+        &message_vibro_on,
+        &message_red_255,
+        &message_delay_100,
+        &message_vibro_off,
+        NULL,
+    };
+
 
     ViewPort* view_port = view_port_alloc();
     view_port_draw_callback_set(view_port, render_callback, &state);
@@ -142,7 +157,8 @@ int32_t ir_scope_app(void* p) {
     bool processing = true;
     while(processing &&
           furi_message_queue_get(event_queue, &event, FuriWaitForever) == FuriStatusOk) {
-        if(event.type == InputTypeRelease) {
+        if(event.type == InputTypePress || event.type == InputTypeLong ||
+                                           event.type == InputTypeRepeat) {
             furi_mutex_acquire(state.mutex, FuriWaitForever);
 
             if(event.key == InputKeyBack) {
@@ -153,6 +169,18 @@ int32_t ir_scope_app(void* p) {
             } else if(event.key == InputKeyDown) {
                 state.us_per_sample = MAX(25, state.us_per_sample - 25);
                 state.autoscale = false;
+            } else if (event.key == InputKeyLeft) {
+                if (state.x_origin + 2  < state.timings_cnt) {
+                    state.x_origin += 2 ;
+                } else {
+                    notification_message(notification, &sequence_button_error) ;
+                }
+            } else if (event.key == InputKeyRight) {
+                if (state.x_origin > 1 ) {
+                    state.x_origin -= 2 ;
+                } else {
+                    notification_message(notification, &sequence_button_error) ;
+                }
             } else if(event.key == InputKeyOk) {
                 state.autoscale = !state.autoscale;
                 if(state.autoscale)
